@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Wind Storm Report</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main class="page">
+      <h1>Wind Storm Report</h1>
+      <p class="subtitle">
+        Enter an address to see NOAA wind storm events from the past 10 years.
+      </p>
+
+      <form id="search-form" class="search-form">
+        <label class="field">
+          <span>Address</span>
+          <input
+            type="text"
+            name="address"
+            id="address-input"
+            placeholder="123 Main St, Austin, TX"
+            required
+          />
+        </label>
+        <button type="submit" id="search-button">Get Report</button>
+      </form>
+
+      <section id="status" class="status" aria-live="polite"></section>
+
+      <section class="results">
+        <h2>Results</h2>
+        <ul id="results-list"></ul>
+      </section>
+    </main>
+
+    <script src="/app.js"></script>
+  </body>
+</html>
+
