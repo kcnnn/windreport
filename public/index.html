@@ -1,41 +1,74 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Wind Storm Report</title>
-    <link rel="stylesheet" href="/styles.css" />
-  </head>
-  <body>
-    <main class="page">
-      <h1>Wind Storm Report</h1>
-      <p class="subtitle">
-        Enter an address to see NOAA wind storm events from the past 10 years.
-      </p>
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Wind Report — NOAA Storm History</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=JetBrains+Mono:wght@400;600&family=Source+Sans+3:wght@400;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div class="background-effects">
+    <div class="storm-gradient"></div>
+    <div class="lightning-flash"></div>
+  </div>
 
-      <form id="search-form" class="search-form">
-        <label class="field">
-          <span>Address</span>
-          <input
-            type="text"
-            name="address"
-            id="address-input"
-            placeholder="123 Main St, Austin, TX"
-            required
-          />
-        </label>
-        <button type="submit" id="search-button">Get Report</button>
-      </form>
+  <main class="container">
+    <header class="hero">
+      <div class="logo">
+        <svg class="wind-icon" viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <path d="M6 18h24a6 6 0 1 0-6-6" stroke="currentColor" stroke-width="3" stroke-linecap="round"/>
+          <path d="M6 30h32a6 6 0 1 1-6 6" stroke="currentColor" stroke-width="3" stroke-linecap="round"/>
+          <path d="M6 24h16a4 4 0 1 1-4 4" stroke="currentColor" stroke-width="3" stroke-linecap="round"/>
+        </svg>
+        <h1>WIND REPORT</h1>
+      </div>
+      <p class="tagline">10-year wind storm history powered by NOAA Storm Events Database</p>
+    </header>
 
-      <section id="status" class="status" aria-live="polite"></section>
+    <form id="search-form" class="search-card">
+      <div class="input-group">
+        <label for="address-input">Enter an address</label>
+        <input 
+          type="text" 
+          id="address-input" 
+          name="address"
+          placeholder="1600 Pennsylvania Ave, Washington, DC"
+          autocomplete="street-address"
+          required
+        >
+      </div>
+      <button type="submit" id="search-btn">
+        <span class="btn-text">Generate Report</span>
+        <span class="btn-loader"></span>
+      </button>
+    </form>
 
-      <section class="results">
-        <h2>Results</h2>
-        <ul id="results-list"></ul>
-      </section>
-    </main>
+    <div id="status" class="status" aria-live="polite"></div>
 
-    <script src="/app.js"></script>
-  </body>
+    <section id="results-section" class="results-card hidden">
+      <div class="results-header">
+        <h2>Storm History</h2>
+        <span id="event-count" class="event-count"></span>
+      </div>
+      <div id="location-info" class="location-info"></div>
+      <ul id="results-list" class="results-list"></ul>
+      <div id="no-results" class="no-results hidden">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <circle cx="12" cy="12" r="10"/>
+          <path d="M8 15s1.5-2 4-2 4 2 4 2M9 9h.01M15 9h.01"/>
+        </svg>
+        <p>No wind storm events found for this location in the past 10 years.</p>
+      </div>
+    </section>
+
+    <footer class="footer">
+      <p>Data source: <a href="https://www.ncei.noaa.gov/stormevents/" target="_blank" rel="noopener">NOAA NCEI Storm Events Database</a></p>
+    </footer>
+  </main>
+
+  <script src="/app.js"></script>
+</body>
 </html>
-

@@ -20,10 +20,15 @@ const WIND_EVENT_TYPES = new Set([
   "Thunderstorm Wind",
   "Marine Thunderstorm Wind",
   "Marine High Wind",
-  "Strong Wind"
+  "Strong Wind",
+  "Tropical Storm",
+  "Hurricane",
+  "Hurricane (Typhoon)"
 ]);
 
-const yearFileCache = new Map();
+// Cache for NOAA directory listing
+let directoryCache = { html: null, timestamp: 0 };
+const DIRECTORY_CACHE_TTL = 3600000; // 1 hour
 
 app.use(express.static(path.join(__dirname, "public")));
 
@@ -34,10 +39,14 @@ app.get("/api/windstorms", async (req, res) => {
       return res.status(400).json({ error: "Address is required." });
     }
 
+    console.log(`[${new Date().toISOString()}] Searching for: ${address}`);
+
     const geo = await geocodeAddress(address);
     if (!geo) {
-      return res.status(404).json({ error: "Address could not be geocoded." });
+      return res.status(404).json({ error: "Could not find that address. Try including city and state." });
     }
+
+    console.log(`  Geocoded to: ${geo.county}, ${geo.state}`);
 
     const cutoff = new Date();
     cutoff.setFullYear(cutoff.getFullYear() - 10);
@@ -46,17 +55,35 @@ app.get("/api/windstorms", async (req, res) => {
     const endYear = new Date().getUTCFullYear();
 
     const allEvents = [];
-    for (let year = startYear; year <= endYear; year += 1) {
-      const events = await getWindEventsForYear(year, geo, cutoff);
-      allEvents.push(...events);
+    for (let year = startYear; year <= endYear; year++) {
+      try {
+        const events = await getWindEventsForYear(year, geo, cutoff);
+        allEvents.push(...events);
+        console.log(`  Year ${year}: ${events.length} events`);
+      } catch (err) {
+        console.error(`  Error processing year ${year}:`, err.message);
+      }
     }
 
+    // Sort by date descending (newest first)
     allEvents.sort((a, b) => b.date.getTime() - a.date.getTime());
 
-    const results = allEvents.map((event) => ({
+    // Deduplicate events on same date with same wind speed
+    const seen = new Set();
+    const uniqueEvents = allEvents.filter((e) => {
+      const key = `${formatDate(e.date)}-${e.windSpeedMph}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+
+    const results = uniqueEvents.map((event) => ({
       date: formatDate(event.date),
-      windSpeedMph: event.windSpeedMph
+      windSpeedMph: event.windSpeedMph,
+      eventType: event.eventType
     }));
+
+    console.log(`  Total unique events: ${results.length}`);
 
     return res.json({
       address: geo.displayName,
@@ -65,13 +92,14 @@ app.get("/api/windstorms", async (req, res) => {
       results
     });
   } catch (error) {
-    console.error(error);
-    return res.status(500).json({ error: "Unexpected server error." });
+    console.error("API Error:", error);
+    return res.status(500).json({ error: "Server error. Please try again." });
   }
 });
 
 app.listen(PORT, () => {
-  console.log(`Wind report server running on http://localhost:${PORT}`);
+  console.log(`\n🌪️  Wind Report Server`);
+  console.log(`   http://localhost:${PORT}\n`);
 });
 
 async function geocodeAddress(address) {
@@ -79,11 +107,12 @@ async function geocodeAddress(address) {
   url.searchParams.set("format", "json");
   url.searchParams.set("limit", "1");
   url.searchParams.set("addressdetails", "1");
+  url.searchParams.set("countrycodes", "us");
   url.searchParams.set("q", address);
 
   const response = await fetch(url, {
     headers: {
-      "User-Agent": "windreport/1.0 (local demo)"
+      "User-Agent": "WindReport/2.0 (NOAA Storm Events Lookup)"
     }
   });
 
@@ -98,13 +127,20 @@ async function geocodeAddress(address) {
 
   const result = data[0];
   const details = result.address || {};
+
+  // Extract county - try multiple fields
+  let county = details.county || details.state_district || details.region || null;
+  if (county) {
+    county = county.replace(/\s+County$/i, "").trim();
+  }
+
   return {
     displayName: result.display_name,
     lat: Number(result.lat),
     lon: Number(result.lon),
-    county: details.county || details.state_district || details.region || null,
+    county,
     state: details.state || null,
-    stateCode: details.state_code || null
+    stateCode: (details["ISO3166-2-lvl4"] || "").replace("US-", "") || null
   };
 }
 
@@ -119,10 +155,14 @@ async function getWindEventsForYear(year, geo, cutoff) {
   const filePath = path.join(CACHE_DIR, filename);
   const events = [];
 
+  const normalizedTargetCounty = normalizeName(geo.county);
+  const normalizedTargetState = normalizeName(geo.state);
+
   const parser = parse({
     columns: true,
     relax_column_count: true,
-    relax_quotes: true
+    relax_quotes: true,
+    skip_empty_lines: true
   });
 
   parser.on("readable", () => {
@@ -133,16 +173,19 @@ async function getWindEventsForYear(year, geo, cutoff) {
         continue;
       }
 
-      if ((record.CZ_TYPE || "").trim() !== "C") {
+      // Match by state
+      const recordState = normalizeName(record.STATE);
+      if (normalizedTargetState && recordState !== normalizedTargetState) {
         continue;
       }
 
-      if (geo.state && !matchesState(record.STATE, geo.state)) {
-        continue;
-      }
-
-      if (geo.county && !matchesCounty(record.CZ_NAME, geo.county)) {
-        continue;
+      // Match by county (CZ_TYPE = C means county)
+      const czType = (record.CZ_TYPE || "").trim().toUpperCase();
+      if (czType === "C") {
+        const recordCounty = normalizeName(record.CZ_NAME);
+        if (normalizedTargetCounty && recordCounty !== normalizedTargetCounty) {
+          continue;
+        }
       }
 
       const beginDate = parseNoaaDate(record.BEGIN_DATE_TIME || record.BEGIN_DATE);
@@ -150,14 +193,25 @@ async function getWindEventsForYear(year, geo, cutoff) {
         continue;
       }
 
-      const magnitude = Number.parseFloat(record.MAGNITUDE);
-      if (!Number.isFinite(magnitude)) {
+      // Get wind speed from MAGNITUDE field (for wind events, this is in knots or mph)
+      let magnitude = Number.parseFloat(record.MAGNITUDE);
+      
+      // NOAA stores thunderstorm wind speeds in knots, high wind in mph
+      // Convert knots to mph if needed (thunderstorm wind is typically in knots)
+      const magnitudeType = (record.MAGNITUDE_TYPE || "").toUpperCase();
+      if (magnitudeType === "EG" || magnitudeType === "MG") {
+        // EG = Estimated Gust, MG = Measured Gust - these are in knots
+        magnitude = Math.round(magnitude * 1.15078);
+      }
+
+      if (!Number.isFinite(magnitude) || magnitude <= 0) {
         continue;
       }
 
       events.push({
         date: beginDate,
-        windSpeedMph: Math.round(magnitude)
+        windSpeedMph: Math.round(magnitude),
+        eventType
       });
     }
   });
@@ -166,9 +220,10 @@ async function getWindEventsForYear(year, geo, cutoff) {
   return events;
 }
 
-async function getLatestStormFilename(year) {
-  if (yearFileCache.has(year)) {
-    return yearFileCache.get(year);
+async function getNoaaDirectoryHtml() {
+  const now = Date.now();
+  if (directoryCache.html && now - directoryCache.timestamp < DIRECTORY_CACHE_TTL) {
+    return directoryCache.html;
   }
 
   const response = await fetch(NOAA_DIR_URL);
@@ -177,6 +232,12 @@ async function getLatestStormFilename(year) {
   }
 
   const html = await response.text();
+  directoryCache = { html, timestamp: now };
+  return html;
+}
+
+async function getLatestStormFilename(year) {
+  const html = await getNoaaDirectoryHtml();
   const regex = /StormEvents_details-ftp_v1\.0_d(\d{4})_c(\d{8})\.csv\.gz/g;
   const matches = [];
 
@@ -188,14 +249,11 @@ async function getLatestStormFilename(year) {
   }
 
   if (matches.length === 0) {
-    yearFileCache.set(year, null);
     return null;
   }
 
   matches.sort((a, b) => b.created.localeCompare(a.created));
-  const latest = matches[0].filename;
-  yearFileCache.set(year, latest);
-  return latest;
+  return matches[0].filename;
 }
 
 async function ensureFileDownloaded(filename) {
@@ -208,26 +266,43 @@ async function ensureFileDownloaded(filename) {
     return;
   }
 
+  console.log(`  Downloading ${filename}...`);
   const response = await fetch(`${NOAA_DIR_URL}${filename}`);
   if (!response.ok) {
-    throw new Error(`Failed to download NOAA file ${filename}`);
+    throw new Error(`Failed to download ${filename}`);
   }
 
   await pipeline(response.body, fs.createWriteStream(filePath));
+  console.log(`  Downloaded ${filename}`);
 }
 
 function parseNoaaDate(value) {
-  if (!value) {
-    return null;
+  if (!value) return null;
+
+  // Format: "DD-MON-YY HH:MM:SS" or "MM/DD/YYYY HH:MM:SS"
+  const str = String(value).trim();
+
+  // Try MM/DD/YYYY format first
+  const slashMatch = str.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+  if (slashMatch) {
+    const [, month, day, year] = slashMatch;
+    return new Date(Date.UTC(Number(year), Number(month) - 1, Number(day)));
   }
 
-  const [datePart] = String(value).split(" ");
-  const [month, day, year] = datePart.split("/").map((segment) => Number(segment));
-  if (!month || !day || !year) {
-    return null;
+  // Try DD-MON-YY format
+  const dashMatch = str.match(/^(\d{1,2})-([A-Z]{3})-(\d{2,4})/i);
+  if (dashMatch) {
+    const [, day, monthStr, yearStr] = dashMatch;
+    const months = { JAN: 0, FEB: 1, MAR: 2, APR: 3, MAY: 4, JUN: 5, JUL: 6, AUG: 7, SEP: 8, OCT: 9, NOV: 10, DEC: 11 };
+    const month = months[monthStr.toUpperCase()];
+    let year = Number(yearStr);
+    if (year < 100) year += 2000;
+    if (month !== undefined) {
+      return new Date(Date.UTC(year, month, Number(day)));
+    }
   }
 
-  return new Date(Date.UTC(year, month - 1, day));
+  return null;
 }
 
 function formatDate(date) {
@@ -238,19 +313,11 @@ function formatDate(date) {
 }
 
 function normalizeName(value) {
-  return String(value || "")
+  if (!value) return "";
+  return String(value)
     .toLowerCase()
-    .replace(/county/g, "")
+    .replace(/\s+county$/i, "")
     .replace(/[^a-z0-9\s]/g, " ")
     .replace(/\s+/g, " ")
     .trim();
 }
-
-function matchesCounty(recordCounty, targetCounty) {
-  return normalizeName(recordCounty) === normalizeName(targetCounty);
-}
-
-function matchesState(recordState, targetState) {
-  return normalizeName(recordState) === normalizeName(targetState);
-}
-

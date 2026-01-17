@@ -1,54 +1,108 @@
-const form = document.getElementById("search-form");
-const addressInput = document.getElementById("address-input");
-const statusEl = document.getElementById("status");
-const resultsList = document.getElementById("results-list");
-const searchButton = document.getElementById("search-button");
+const form = document.getElementById('search-form');
+const addressInput = document.getElementById('address-input');
+const searchBtn = document.getElementById('search-btn');
+const statusEl = document.getElementById('status');
+const resultsSection = document.getElementById('results-section');
+const resultsList = document.getElementById('results-list');
+const eventCount = document.getElementById('event-count');
+const locationInfo = document.getElementById('location-info');
+const noResults = document.getElementById('no-results');
 
-form.addEventListener("submit", async (event) => {
-  event.preventDefault();
+form.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  
   const address = addressInput.value.trim();
   if (!address) {
-    statusEl.textContent = "Please enter an address.";
+    showStatus('Please enter an address.', true);
     return;
   }
 
   setLoading(true);
-  statusEl.textContent = "Searching NOAA storm events...";
-  resultsList.innerHTML = "";
+  showStatus('Searching NOAA Storm Events database...');
+  hideResults();
 
   try {
     const response = await fetch(`/api/windstorms?address=${encodeURIComponent(address)}`);
-    const payload = await response.json();
+    const data = await response.json();
 
     if (!response.ok) {
-      statusEl.textContent = payload.error || "Request failed.";
+      showStatus(data.error || 'Request failed. Please try again.', true);
       return;
     }
 
-    statusEl.textContent = `Results for ${payload.address} (${payload.county || "Unknown county"}, ${
-      payload.state || "Unknown state"
-    })`;
-
-    if (!payload.results || payload.results.length === 0) {
-      resultsList.innerHTML = "<li>No wind storm events found in the last 10 years.</li>";
-      return;
-    }
-
-    payload.results.forEach((item) => {
-      const li = document.createElement("li");
-      li.textContent = `DATE: ${item.date} - WIND SPEED: ${item.windSpeedMph} MPH`;
-      resultsList.appendChild(li);
-    });
-  } catch (error) {
-    statusEl.textContent = "Something went wrong. Please try again.";
-    console.error(error);
+    displayResults(data);
+  } catch (err) {
+    console.error(err);
+    showStatus('Connection error. Please check your network and try again.', true);
   } finally {
     setLoading(false);
   }
 });
 
 function setLoading(isLoading) {
-  searchButton.disabled = isLoading;
+  searchBtn.disabled = isLoading;
   addressInput.disabled = isLoading;
+  searchBtn.classList.toggle('loading', isLoading);
 }
 
+function showStatus(message, isError = false) {
+  statusEl.textContent = message;
+  statusEl.classList.toggle('error', isError);
+}
+
+function hideResults() {
+  resultsSection.classList.add('hidden');
+  resultsList.innerHTML = '';
+}
+
+function displayResults(data) {
+  const { address, county, state, results } = data;
+
+  // Update location info
+  const locationParts = [];
+  if (county) locationParts.push(county);
+  if (state) locationParts.push(state);
+  locationInfo.textContent = locationParts.length > 0 
+    ? `📍 ${locationParts.join(', ')}` 
+    : address;
+
+  // Show results section
+  resultsSection.classList.remove('hidden');
+
+  if (!results || results.length === 0) {
+    noResults.classList.remove('hidden');
+    eventCount.textContent = '0 events';
+    showStatus('Search complete.', false);
+    return;
+  }
+
+  noResults.classList.add('hidden');
+  eventCount.textContent = `${results.length} event${results.length !== 1 ? 's' : ''}`;
+  showStatus(`Found ${results.length} wind storm event${results.length !== 1 ? 's' : ''} in the past 10 years.`);
+
+  // Render results
+  resultsList.innerHTML = '';
+  results.forEach((item, index) => {
+    const li = document.createElement('li');
+    li.style.animationDelay = `${Math.min(index * 0.03, 0.5)}s`;
+    
+    const isSevere = item.windSpeedMph >= 75;
+    
+    li.innerHTML = `
+      <span class="date">DATE: ${item.date}</span>
+      <span>
+        <span class="speed ${isSevere ? 'severe' : ''}">WIND SPEED: ${item.windSpeedMph} MPH</span>
+        ${item.eventType ? `<span class="event-type">${item.eventType}</span>` : ''}
+      </span>
+    `;
+    
+    resultsList.appendChild(li);
+  });
+}
+
+// Allow Enter key to submit
+addressInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !searchBtn.disabled) {
+    form.requestSubmit();
+  }
+});
