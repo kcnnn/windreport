@@ -1,5 +1,6 @@
 const form = document.getElementById('search-form');
 const addressInput = document.getElementById('address-input');
+const radiusSelect = document.getElementById('radius-select');
 const searchBtn = document.getElementById('search-btn');
 const statusEl = document.getElementById('status');
 const resultsSection = document.getElementById('results-section');
@@ -17,12 +18,15 @@ form.addEventListener('submit', async (e) => {
     return;
   }
 
+  const radius = radiusSelect.value;
+
   setLoading(true);
   showStatus('Searching NOAA Storm Events database...');
   hideResults();
 
   try {
-    const response = await fetch(`/api/windstorms?address=${encodeURIComponent(address)}`);
+    const url = `/api/windstorms?address=${encodeURIComponent(address)}&radius=${radius}`;
+    const response = await fetch(url);
     const data = await response.json();
 
     if (!response.ok) {
@@ -56,15 +60,17 @@ function hideResults() {
 }
 
 function displayResults(data) {
-  const { address, county, state, results } = data;
+  const { address, county, state, radiusMiles, results } = data;
 
   // Update location info
   const locationParts = [];
   if (county) locationParts.push(county);
   if (state) locationParts.push(state);
-  locationInfo.textContent = locationParts.length > 0 
-    ? `📍 ${locationParts.join(', ')}` 
-    : address;
+  let locationText = locationParts.length > 0 ? `📍 ${locationParts.join(', ')}` : address;
+  if (radiusMiles) {
+    locationText += ` (within ${radiusMiles} miles)`;
+  }
+  locationInfo.textContent = locationText;
 
   // Show results section
   resultsSection.classList.remove('hidden');
@@ -72,7 +78,10 @@ function displayResults(data) {
   if (!results || results.length === 0) {
     noResults.classList.remove('hidden');
     eventCount.textContent = '0 events';
-    showStatus('Search complete.', false);
+    const msg = radiusMiles 
+      ? `No wind storms found within ${radiusMiles} miles. Try increasing the radius.`
+      : 'Search complete.';
+    showStatus(msg, false);
     return;
   }
 
@@ -87,12 +96,13 @@ function displayResults(data) {
     li.style.animationDelay = `${Math.min(index * 0.03, 0.5)}s`;
     
     const isSevere = item.windSpeedMph >= 75;
+    const distanceText = item.distanceMiles !== null ? ` · ${item.distanceMiles} mi away` : '';
     
     li.innerHTML = `
       <span class="date">DATE: ${item.date}</span>
       <span>
         <span class="speed ${isSevere ? 'severe' : ''}">WIND SPEED: ${item.windSpeedMph} MPH</span>
-        ${item.eventType ? `<span class="event-type">${item.eventType}</span>` : ''}
+        <span class="event-type">${item.eventType || ''}${distanceText}</span>
       </span>
     `;
     

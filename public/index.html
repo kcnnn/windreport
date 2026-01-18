@@ -40,6 +40,16 @@
           required
         >
       </div>
+      <div class="input-group">
+        <label for="radius-select">Search radius</label>
+        <select id="radius-select" name="radius">
+          <option value="0">Entire county (all events)</option>
+          <option value="5">Within 5 miles</option>
+          <option value="10">Within 10 miles</option>
+          <option value="25" selected>Within 25 miles</option>
+          <option value="50">Within 50 miles</option>
+        </select>
+      </div>
       <button type="submit" id="search-btn">
         <span class="btn-text">Generate Report</span>
         <span class="btn-loader"></span>

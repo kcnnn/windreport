@@ -39,14 +39,17 @@ app.get("/api/windstorms", async (req, res) => {
       return res.status(400).json({ error: "Address is required." });
     }
 
-    console.log(`[${new Date().toISOString()}] Searching for: ${address}`);
+    // Radius in miles (0 = county-wide, no filtering)
+    const radiusMiles = Math.max(0, Number(req.query.radius) || 0);
+
+    console.log(`[${new Date().toISOString()}] Searching for: ${address} (radius: ${radiusMiles || 'county-wide'})`);
 
     const geo = await geocodeAddress(address);
     if (!geo) {
       return res.status(404).json({ error: "Could not find that address. Try including city and state." });
     }
 
-    console.log(`  Geocoded to: ${geo.county}, ${geo.state}`);
+    console.log(`  Geocoded to: ${geo.county}, ${geo.state} (${geo.lat}, ${geo.lon})`);
 
     const cutoff = new Date();
     cutoff.setFullYear(cutoff.getFullYear() - 10);
@@ -68,9 +71,27 @@ app.get("/api/windstorms", async (req, res) => {
     // Sort by date descending (newest first)
     allEvents.sort((a, b) => b.date.getTime() - a.date.getTime());
 
+    // If radius specified, filter by distance and calculate distances
+    let filteredEvents = allEvents;
+    if (radiusMiles > 0) {
+      filteredEvents = allEvents
+        .map((e) => {
+          if (e.lat && e.lon) {
+            e.distanceMiles = haversineDistance(geo.lat, geo.lon, e.lat, e.lon);
+          }
+          return e;
+        })
+        .filter((e) => {
+          // Include if no coords (can't filter) or within radius
+          if (!e.lat || !e.lon) return false; // Exclude events without coords when radius specified
+          return e.distanceMiles <= radiusMiles;
+        });
+      console.log(`  After ${radiusMiles}mi radius filter: ${filteredEvents.length} events`);
+    }
+
     // Deduplicate events on same date with same wind speed
     const seen = new Set();
-    const uniqueEvents = allEvents.filter((e) => {
+    const uniqueEvents = filteredEvents.filter((e) => {
       const key = `${formatDate(e.date)}-${e.windSpeedMph}`;
       if (seen.has(key)) return false;
       seen.add(key);
@@ -80,7 +101,8 @@ app.get("/api/windstorms", async (req, res) => {
     const results = uniqueEvents.map((event) => ({
       date: formatDate(event.date),
       windSpeedMph: event.windSpeedMph,
-      eventType: event.eventType
+      eventType: event.eventType,
+      distanceMiles: event.distanceMiles ? Math.round(event.distanceMiles * 10) / 10 : null
     }));
 
     console.log(`  Total unique events: ${results.length}`);
@@ -89,6 +111,7 @@ app.get("/api/windstorms", async (req, res) => {
       address: geo.displayName,
       county: geo.county,
       state: geo.state,
+      radiusMiles: radiusMiles || null,
       results
     });
   } catch (error) {
@@ -129,10 +152,18 @@ async function geocodeAddress(address) {
   const details = result.address || {};
 
   // Extract county - try multiple fields
-  let county = details.county || details.state_district || details.region || null;
+  let county = details.county || details.state_district || details.region || details.city || null;
   if (county) {
-    county = county.replace(/\s+County$/i, "").trim();
+    // Remove common suffixes
+    county = county
+      .replace(/\s+County$/i, "")
+      .replace(/\s+Parish$/i, "")  // Louisiana uses parishes
+      .replace(/\s+Borough$/i, "")  // Alaska uses boroughs
+      .replace(/\s+Census Area$/i, "")  // Alaska
+      .trim();
   }
+
+  console.log(`  Geocoded details: county="${county}", state="${details.state}", city="${details.city}"`);
 
   return {
     displayName: result.display_name,
@@ -147,6 +178,7 @@ async function geocodeAddress(address) {
 async function getWindEventsForYear(year, geo, cutoff) {
   const filename = await getLatestStormFilename(year);
   if (!filename) {
+    console.log(`  No file found for year ${year}`);
     return [];
   }
 
@@ -157,6 +189,11 @@ async function getWindEventsForYear(year, geo, cutoff) {
 
   const normalizedTargetCounty = normalizeName(geo.county);
   const normalizedTargetState = normalizeName(geo.state);
+  
+  console.log(`  Looking for: state="${normalizedTargetState}" county="${normalizedTargetCounty}"`);
+
+  let windEventsInState = 0;
+  let sampleCounties = new Set();
 
   const parser = parse({
     columns: true,
@@ -179,11 +216,27 @@ async function getWindEventsForYear(year, geo, cutoff) {
         continue;
       }
 
-      // Match by county (CZ_TYPE = C means county)
+      windEventsInState++;
+      
+      // Collect sample counties for debugging
+      const recordCounty = normalizeName(record.CZ_NAME);
+      if (sampleCounties.size < 10) {
+        sampleCounties.add(recordCounty);
+      }
+
+      // Match by county (CZ_TYPE = C means county, Z means zone)
       const czType = (record.CZ_TYPE || "").trim().toUpperCase();
-      if (czType === "C") {
-        const recordCounty = normalizeName(record.CZ_NAME);
-        if (normalizedTargetCounty && recordCounty !== normalizedTargetCounty) {
+      
+      // For county matching, use flexible matching
+      if (normalizedTargetCounty) {
+        const countyMatches = 
+          recordCounty === normalizedTargetCounty ||
+          recordCounty.includes(normalizedTargetCounty) ||
+          normalizedTargetCounty.includes(recordCounty) ||
+          // Handle case where one is abbreviated
+          recordCounty.split(" ")[0] === normalizedTargetCounty.split(" ")[0];
+        
+        if (!countyMatches) {
           continue;
         }
       }
@@ -208,15 +261,27 @@ async function getWindEventsForYear(year, geo, cutoff) {
         continue;
       }
 
+      // Get coordinates if available
+      const lat = Number.parseFloat(record.BEGIN_LAT);
+      const lon = Number.parseFloat(record.BEGIN_LON);
+
       events.push({
         date: beginDate,
         windSpeedMph: Math.round(magnitude),
-        eventType
+        eventType,
+        lat: Number.isFinite(lat) ? lat : null,
+        lon: Number.isFinite(lon) ? lon : null
       });
     }
   });
 
   await pipeline(fs.createReadStream(filePath), zlib.createGunzip(), parser);
+  
+  if (events.length === 0 && windEventsInState > 0) {
+    console.log(`  Found ${windEventsInState} wind events in state but none in county.`);
+    console.log(`  Sample counties in data: ${[...sampleCounties].join(", ")}`);
+  }
+  
   return events;
 }
 
@@ -320,4 +385,20 @@ function normalizeName(value) {
     .replace(/[^a-z0-9\s]/g, " ")
     .replace(/\s+/g, " ")
     .trim();
+}
+
+// Calculate distance between two lat/lon points in miles (Haversine formula)
+function haversineDistance(lat1, lon1, lat2, lon2) {
+  const R = 3958.8; // Earth's radius in miles
+  const dLat = toRad(lat2 - lat1);
+  const dLon = toRad(lon2 - lon1);
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) * Math.sin(dLon / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return R * c;
+}
+
+function toRad(deg) {
+  return deg * (Math.PI / 180);
 }
