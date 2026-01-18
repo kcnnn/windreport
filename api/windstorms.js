@@ -1,22 +1,11 @@
-import express from "express";
 import fs from "fs";
 import path from "path";
 import zlib from "zlib";
-import { fileURLToPath } from "url";
 import { pipeline } from "stream/promises";
 import { parse } from "csv-parse";
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-
-const app = express();
-const PORT = process.env.PORT || 3000;
-
 const NOAA_DIR_URL = "https://www.ncei.noaa.gov/pub/data/swdi/stormevents/csvfiles/";
-// Use /tmp on Vercel (serverless), local data dir otherwise
-const CACHE_DIR = process.env.VERCEL 
-  ? "/tmp/noaa" 
-  : path.join(__dirname, "data", "noaa");
+const CACHE_DIR = "/tmp/noaa";
 
 const WIND_EVENT_TYPES = new Set([
   "High Wind",
@@ -29,30 +18,34 @@ const WIND_EVENT_TYPES = new Set([
   "Hurricane (Typhoon)"
 ]);
 
-// Cache for NOAA directory listing
 let directoryCache = { html: null, timestamp: 0 };
-const DIRECTORY_CACHE_TTL = 3600000; // 1 hour
+const DIRECTORY_CACHE_TTL = 3600000;
 
-app.use(express.static(path.join(__dirname, "public")));
+export default async function handler(req, res) {
+  // Set CORS headers
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET');
+  
+  if (req.method !== 'GET') {
+    return res.status(405).json({ error: 'Method not allowed' });
+  }
 
-app.get("/api/windstorms", async (req, res) => {
   try {
     const address = String(req.query.address || "").trim();
     if (!address) {
       return res.status(400).json({ error: "Address is required." });
     }
 
-    // Radius in miles (0 = county-wide, no filtering)
     const radiusMiles = Math.max(0, Number(req.query.radius) || 0);
 
-    console.log(`[${new Date().toISOString()}] Searching for: ${address} (radius: ${radiusMiles || 'county-wide'})`);
+    console.log(`Searching for: ${address} (radius: ${radiusMiles || 'county-wide'})`);
 
     const geo = await geocodeAddress(address);
     if (!geo) {
       return res.status(404).json({ error: "Could not find that address. Try including city and state." });
     }
 
-    console.log(`  Geocoded to: ${geo.county}, ${geo.state} (${geo.lat}, ${geo.lon})`);
+    console.log(`Geocoded to: ${geo.county}, ${geo.state} (${geo.lat}, ${geo.lon})`);
 
     const cutoff = new Date();
     cutoff.setFullYear(cutoff.getFullYear() - 10);
@@ -65,16 +58,14 @@ app.get("/api/windstorms", async (req, res) => {
       try {
         const events = await getWindEventsForYear(year, geo, cutoff);
         allEvents.push(...events);
-        console.log(`  Year ${year}: ${events.length} events`);
+        console.log(`Year ${year}: ${events.length} events`);
       } catch (err) {
-        console.error(`  Error processing year ${year}:`, err.message);
+        console.error(`Error processing year ${year}:`, err.message);
       }
     }
 
-    // Sort by date descending (newest first)
     allEvents.sort((a, b) => b.date.getTime() - a.date.getTime());
 
-    // If radius specified, filter by distance and calculate distances
     let filteredEvents = allEvents;
     if (radiusMiles > 0) {
       filteredEvents = allEvents
@@ -85,14 +76,11 @@ app.get("/api/windstorms", async (req, res) => {
           return e;
         })
         .filter((e) => {
-          // Include if no coords (can't filter) or within radius
-          if (!e.lat || !e.lon) return false; // Exclude events without coords when radius specified
+          if (!e.lat || !e.lon) return false;
           return e.distanceMiles <= radiusMiles;
         });
-      console.log(`  After ${radiusMiles}mi radius filter: ${filteredEvents.length} events`);
     }
 
-    // Deduplicate events on same date with same wind speed
     const seen = new Set();
     const uniqueEvents = filteredEvents.filter((e) => {
       const key = `${formatDate(e.date)}-${e.windSpeedMph}`;
@@ -108,9 +96,9 @@ app.get("/api/windstorms", async (req, res) => {
       distanceMiles: event.distanceMiles ? Math.round(event.distanceMiles * 10) / 10 : null
     }));
 
-    console.log(`  Total unique events: ${results.length}`);
+    console.log(`Total unique events: ${results.length}`);
 
-    return res.json({
+    return res.status(200).json({
       address: geo.displayName,
       county: geo.county,
       state: geo.state,
@@ -121,12 +109,7 @@ app.get("/api/windstorms", async (req, res) => {
     console.error("API Error:", error);
     return res.status(500).json({ error: "Server error. Please try again." });
   }
-});
-
-app.listen(PORT, () => {
-  console.log(`\n🌪️  Wind Report Server`);
-  console.log(`   http://localhost:${PORT}\n`);
-});
+}
 
 async function geocodeAddress(address) {
   const url = new URL("https://nominatim.openstreetmap.org/search");
@@ -137,53 +120,39 @@ async function geocodeAddress(address) {
   url.searchParams.set("q", address);
 
   const response = await fetch(url, {
-    headers: {
-      "User-Agent": "WindReport/2.0 (NOAA Storm Events Lookup)"
-    }
+    headers: { "User-Agent": "WindReport/2.0 (NOAA Storm Events Lookup)" }
   });
 
-  if (!response.ok) {
-    return null;
-  }
+  if (!response.ok) return null;
 
   const data = await response.json();
-  if (!Array.isArray(data) || data.length === 0) {
-    return null;
-  }
+  if (!Array.isArray(data) || data.length === 0) return null;
 
   const result = data[0];
   const details = result.address || {};
 
-  // Extract county - try multiple fields
   let county = details.county || details.state_district || details.region || details.city || null;
   if (county) {
-    // Remove common suffixes
     county = county
       .replace(/\s+County$/i, "")
-      .replace(/\s+Parish$/i, "")  // Louisiana uses parishes
-      .replace(/\s+Borough$/i, "")  // Alaska uses boroughs
-      .replace(/\s+Census Area$/i, "")  // Alaska
+      .replace(/\s+Parish$/i, "")
+      .replace(/\s+Borough$/i, "")
+      .replace(/\s+Census Area$/i, "")
       .trim();
   }
-
-  console.log(`  Geocoded details: county="${county}", state="${details.state}", city="${details.city}"`);
 
   return {
     displayName: result.display_name,
     lat: Number(result.lat),
     lon: Number(result.lon),
     county,
-    state: details.state || null,
-    stateCode: (details["ISO3166-2-lvl4"] || "").replace("US-", "") || null
+    state: details.state || null
   };
 }
 
 async function getWindEventsForYear(year, geo, cutoff) {
   const filename = await getLatestStormFilename(year);
-  if (!filename) {
-    console.log(`  No file found for year ${year}`);
-    return [];
-  }
+  if (!filename) return [];
 
   await ensureFileDownloaded(filename);
 
@@ -192,11 +161,6 @@ async function getWindEventsForYear(year, geo, cutoff) {
 
   const normalizedTargetCounty = normalizeName(geo.county);
   const normalizedTargetState = normalizeName(geo.state);
-  
-  console.log(`  Looking for: state="${normalizedTargetState}" county="${normalizedTargetCounty}"`);
-
-  let windEventsInState = 0;
-  let sampleCounties = new Set();
 
   const parser = parse({
     columns: true,
@@ -209,62 +173,32 @@ async function getWindEventsForYear(year, geo, cutoff) {
     let record;
     while ((record = parser.read())) {
       const eventType = (record.EVENT_TYPE || "").trim();
-      if (!WIND_EVENT_TYPES.has(eventType)) {
-        continue;
-      }
+      if (!WIND_EVENT_TYPES.has(eventType)) continue;
 
-      // Match by state
       const recordState = normalizeName(record.STATE);
-      if (normalizedTargetState && recordState !== normalizedTargetState) {
-        continue;
-      }
+      if (normalizedTargetState && recordState !== normalizedTargetState) continue;
 
-      windEventsInState++;
-      
-      // Collect sample counties for debugging
       const recordCounty = normalizeName(record.CZ_NAME);
-      if (sampleCounties.size < 10) {
-        sampleCounties.add(recordCounty);
-      }
 
-      // Match by county (CZ_TYPE = C means county, Z means zone)
-      const czType = (record.CZ_TYPE || "").trim().toUpperCase();
-      
-      // For county matching, use flexible matching
       if (normalizedTargetCounty) {
-        const countyMatches = 
+        const countyMatches =
           recordCounty === normalizedTargetCounty ||
           recordCounty.includes(normalizedTargetCounty) ||
           normalizedTargetCounty.includes(recordCounty) ||
-          // Handle case where one is abbreviated
           recordCounty.split(" ")[0] === normalizedTargetCounty.split(" ")[0];
-        
-        if (!countyMatches) {
-          continue;
-        }
+        if (!countyMatches) continue;
       }
 
       const beginDate = parseNoaaDate(record.BEGIN_DATE_TIME || record.BEGIN_DATE);
-      if (!beginDate || beginDate < cutoff) {
-        continue;
-      }
+      if (!beginDate || beginDate < cutoff) continue;
 
-      // Get wind speed from MAGNITUDE field (for wind events, this is in knots or mph)
       let magnitude = Number.parseFloat(record.MAGNITUDE);
-      
-      // NOAA stores thunderstorm wind speeds in knots, high wind in mph
-      // Convert knots to mph if needed (thunderstorm wind is typically in knots)
       const magnitudeType = (record.MAGNITUDE_TYPE || "").toUpperCase();
       if (magnitudeType === "EG" || magnitudeType === "MG") {
-        // EG = Estimated Gust, MG = Measured Gust - these are in knots
         magnitude = Math.round(magnitude * 1.15078);
       }
+      if (!Number.isFinite(magnitude) || magnitude <= 0) continue;
 
-      if (!Number.isFinite(magnitude) || magnitude <= 0) {
-        continue;
-      }
-
-      // Get coordinates if available
       const lat = Number.parseFloat(record.BEGIN_LAT);
       const lon = Number.parseFloat(record.BEGIN_LON);
 
@@ -279,12 +213,6 @@ async function getWindEventsForYear(year, geo, cutoff) {
   });
 
   await pipeline(fs.createReadStream(filePath), zlib.createGunzip(), parser);
-  
-  if (events.length === 0 && windEventsInState > 0) {
-    console.log(`  Found ${windEventsInState} wind events in state but none in county.`);
-    console.log(`  Sample counties in data: ${[...sampleCounties].join(", ")}`);
-  }
-  
   return events;
 }
 
@@ -295,9 +223,7 @@ async function getNoaaDirectoryHtml() {
   }
 
   const response = await fetch(NOAA_DIR_URL);
-  if (!response.ok) {
-    throw new Error("Failed to fetch NOAA directory listing.");
-  }
+  if (!response.ok) throw new Error("Failed to fetch NOAA directory listing.");
 
   const html = await response.text();
   directoryCache = { html, timestamp: now };
@@ -316,10 +242,7 @@ async function getLatestStormFilename(year) {
     }
   }
 
-  if (matches.length === 0) {
-    return null;
-  }
-
+  if (matches.length === 0) return null;
   matches.sort((a, b) => b.created.localeCompare(a.created));
   return matches[0].filename;
 }
@@ -330,34 +253,26 @@ async function ensureFileDownloaded(filename) {
   }
 
   const filePath = path.join(CACHE_DIR, filename);
-  if (fs.existsSync(filePath)) {
-    return;
-  }
+  if (fs.existsSync(filePath)) return;
 
-  console.log(`  Downloading ${filename}...`);
+  console.log(`Downloading ${filename}...`);
   const response = await fetch(`${NOAA_DIR_URL}${filename}`);
-  if (!response.ok) {
-    throw new Error(`Failed to download ${filename}`);
-  }
+  if (!response.ok) throw new Error(`Failed to download ${filename}`);
 
   await pipeline(response.body, fs.createWriteStream(filePath));
-  console.log(`  Downloaded ${filename}`);
+  console.log(`Downloaded ${filename}`);
 }
 
 function parseNoaaDate(value) {
   if (!value) return null;
-
-  // Format: "DD-MON-YY HH:MM:SS" or "MM/DD/YYYY HH:MM:SS"
   const str = String(value).trim();
 
-  // Try MM/DD/YYYY format first
   const slashMatch = str.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/);
   if (slashMatch) {
     const [, month, day, year] = slashMatch;
     return new Date(Date.UTC(Number(year), Number(month) - 1, Number(day)));
   }
 
-  // Try DD-MON-YY format
   const dashMatch = str.match(/^(\d{1,2})-([A-Z]{3})-(\d{2,4})/i);
   if (dashMatch) {
     const [, day, monthStr, yearStr] = dashMatch;
@@ -365,9 +280,7 @@ function parseNoaaDate(value) {
     const month = months[monthStr.toUpperCase()];
     let year = Number(yearStr);
     if (year < 100) year += 2000;
-    if (month !== undefined) {
-      return new Date(Date.UTC(year, month, Number(day)));
-    }
+    if (month !== undefined) return new Date(Date.UTC(year, month, Number(day)));
   }
 
   return null;
@@ -390,9 +303,8 @@ function normalizeName(value) {
     .trim();
 }
 
-// Calculate distance between two lat/lon points in miles (Haversine formula)
 function haversineDistance(lat1, lon1, lat2, lon2) {
-  const R = 3958.8; // Earth's radius in miles
+  const R = 3958.8;
   const dLat = toRad(lat2 - lat1);
   const dLon = toRad(lon2 - lon1);
   const a =

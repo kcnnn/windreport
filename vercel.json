@@ -1,0 +1,14 @@
+{
+  "version": 2,
+  "functions": {
+    "api/windstorms.js": {
+      "maxDuration": 300
+    }
+  },
+  "rewrites": [
+    {
+      "source": "/api/windstorms",
+      "destination": "/api/windstorms"
+    }
+  ]
+}
